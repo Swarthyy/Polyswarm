@@ -19,30 +19,42 @@ interface NormalizedPoint {
     rawPoly: number
 }
 
+interface GateInfo {
+    status: 'PASS' | 'FAIL' | 'PENDING'
+    value: number
+    message: string
+}
+
+interface ScanStatus {
+    timestamp: number
+    impulse: GateInfo
+    trap: GateInfo
+    fee: GateInfo
+    reject_reason: string | null
+    edge_percent: number
+    spread: number
+}
+
 interface TradeSignal {
     id: string
     timestamp: number
     time: string
-    signal_type: 'Lat-Lag' | 'Neg-Risk'
+    signal_type: string
     direction: string
     market: string
     binance_price: number
-    fair_value: number
-    market_price: number
+    poly_price: number
     edge_percent: number
-    ev_dollars: number
     confidence: number
-    yes_ask: number | null
-    no_ask: number | null
-    cost_basis: number | null
+    impulse_status: string
+    trap_status: string
+    fee_status: string
     status: string
 }
 
 function normalizeData(history: GapMonitorData[]): NormalizedPoint[] {
     if (history.length === 0) return []
-
     const baseline = history[0].binance
-
     return history.map((point) => ({
         time: new Date(point.timestamp).toLocaleTimeString('en-US', {
             hour12: false,
@@ -68,29 +80,41 @@ function formatPrice(value: number): string {
 
 interface TooltipProps {
     active?: boolean
-    payload?: Array<{
-        value: number
-        dataKey: string
-        payload: NormalizedPoint
-    }>
+    payload?: Array<{ value: number; dataKey: string; payload: NormalizedPoint }>
 }
 
 function CustomTooltip({ active, payload }: TooltipProps) {
     if (!active || !payload || payload.length === 0) return null
-
     const data = payload[0].payload
-
     return (
         <div className="bg-void-light border border-border-dark p-2 text-xs font-mono">
             <div className="text-text-muted mb-1">{data.time}</div>
-            <div className="text-neon-green">
-                BIN: {formatPrice(data.rawBinance)}
-            </div>
-            <div className="text-danger">
-                POLY: {formatPrice(data.rawPoly)}
-            </div>
+            <div className="text-neon-green">BIN: {formatPrice(data.rawBinance)}</div>
+            <div className="text-danger">POLY: {formatPrice(data.rawPoly)}</div>
             <div className="text-gold mt-1 border-t border-border-dark pt-1">
                 GAP: {data.gap.toFixed(4)}%
+            </div>
+        </div>
+    )
+}
+
+function GateIndicator({ gate, label }: { gate: GateInfo; label: string }) {
+    const statusColors = {
+        PASS: 'text-neon-green bg-neon-green/10 border-neon-green/30',
+        FAIL: 'text-danger bg-danger/10 border-danger/30',
+        PENDING: 'text-warning bg-warning/10 border-warning/30'
+    }
+
+    return (
+        <div className={`p-2 rounded border ${statusColors[gate.status]}`}>
+            <div className="flex items-center justify-between mb-1">
+                <span className="text-[9px] uppercase tracking-wider opacity-70">{label}</span>
+                <span className={`text-[9px] font-bold ${gate.status === 'PASS' ? 'text-neon-green' : gate.status === 'FAIL' ? 'text-danger' : 'text-warning'}`}>
+                    {gate.status}
+                </span>
+            </div>
+            <div className="text-[10px] font-mono truncate" title={gate.message}>
+                {gate.message}
             </div>
         </div>
     )
@@ -99,23 +123,28 @@ function CustomTooltip({ active, payload }: TooltipProps) {
 export function ArbLogTable() {
     const { gapData, priceHistory, isConnected } = useGapMonitor()
     const [signals, setSignals] = useState<TradeSignal[]>([])
-    const [showChart, setShowChart] = useState(true)
+    const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null)
+    const [view, setView] = useState<'gates' | 'chart' | 'signals'>('gates')
 
-    // Listen for trade signals via separate WebSocket message handler
     useEffect(() => {
         const ws = new WebSocket('ws://localhost:8000/ws')
 
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data)
+
+                if (data.type === 'scan_status') {
+                    setScanStatus(data as ScanStatus)
+                }
+
                 if (data.type === 'trade_signal' && data.signal) {
                     setSignals(prev => {
                         const updated = [data.signal, ...prev]
-                        return updated.slice(0, 20) // Keep last 20 signals
+                        return updated.slice(0, 50)
                     })
                 }
             } catch {
-                // Ignore parse errors
+                // Ignore
             }
         }
 
@@ -130,100 +159,130 @@ export function ArbLogTable() {
         return Math.round(sum / priceHistory.length)
     }, [priceHistory])
 
-    const gapDirection = gapData
-        ? gapData.gap_percent > 0 ? 'BINANCE LEADS' : 'POLY LEADS'
-        : '--'
-
-    const getSignalRowClass = useCallback((signalType: string) => {
-        if (signalType === 'Neg-Risk') {
-            return 'bg-neon-green/10 border-l-2 border-neon-green'
+    const getRejectLabel = useCallback((reason: string | null) => {
+        if (!reason) return null
+        const labels: Record<string, { text: string; color: string }> = {
+            'NO_IMPULSE': { text: 'NO IMPULSE', color: 'text-text-muted' },
+            'TRAP': { text: 'TRAP DETECTED', color: 'text-danger' },
+            'LOW_MARGIN': { text: 'LOW MARGIN', color: 'text-warning' },
+            'WAITING': { text: 'ACCUMULATING...', color: 'text-blue-400' }
         }
-        if (signalType === 'Lat-Lag') {
-            return 'bg-blue-500/10 border-l-2 border-blue-500'
-        }
-        return ''
+        return labels[reason] || { text: reason, color: 'text-text-muted' }
     }, [])
 
-    const getSignalBadgeClass = useCallback((signalType: string) => {
-        if (signalType === 'Neg-Risk') {
-            return 'bg-neon-green/20 text-neon-green border-neon-green/50'
-        }
-        if (signalType === 'Lat-Lag') {
-            return 'bg-blue-500/20 text-blue-400 border-blue-500/50'
-        }
-        return 'bg-text-muted/20 text-text-muted'
-    }, [])
+    const godCandleCount = signals.filter(s => s.signal_type === 'GOD_CANDLE').length
 
     return (
         <div className="h-full flex flex-col">
-            {/* Header with toggle */}
-            <div className="text-[10px] text-text-muted uppercase tracking-wider mb-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                    <span>Core A: Math Engine</span>
-                    <button
-                        onClick={() => setShowChart(!showChart)}
-                        className="text-[9px] px-2 py-0.5 border border-border-dark rounded hover:border-neon-green/50 transition-colors"
-                    >
-                        {showChart ? 'SIGNALS' : 'CHART'}
-                    </button>
+            {/* Header */}
+            <div className="text-[10px] text-text-muted uppercase tracking-wider mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <span>$912k Strategy</span>
+                    <div className="flex gap-1">
+                        {['gates', 'chart', 'signals'].map((v) => (
+                            <button
+                                key={v}
+                                onClick={() => setView(v as typeof view)}
+                                className={`text-[8px] px-1.5 py-0.5 rounded border transition-colors ${
+                                    view === v
+                                        ? 'border-neon-green/50 text-neon-green bg-neon-green/10'
+                                        : 'border-border-dark text-text-muted hover:border-neon-green/30'
+                                }`}
+                            >
+                                {v.toUpperCase()}
+                            </button>
+                        ))}
+                    </div>
                 </div>
                 <span className={isConnected ? 'text-neon-green' : 'text-danger'}>
-                    {isConnected ? '● STREAMING' : '○ DISCONNECTED'}
+                    {isConnected ? '● LIVE' : '○ OFFLINE'}
                 </span>
             </div>
 
-            {/* Latency Delta Display */}
-            <div className="mb-3 p-2 bg-void border border-border-dark rounded">
-                <div className="flex items-baseline justify-between">
+            {/* Price Bar */}
+            <div className="mb-2 p-2 bg-void border border-border-dark rounded">
+                <div className="grid grid-cols-4 gap-2 text-center">
                     <div>
-                        <span className="text-[9px] text-text-muted uppercase">Latency</span>
-                        <span className="text-xl font-mono font-bold text-gold ml-2">
-                            {gapData ? Math.round(gapData.latency_delta_ms) : '--'}
-                            <span className="text-xs text-text-secondary ml-1">ms</span>
-                        </span>
+                        <div className="text-[8px] text-text-muted">BINANCE</div>
+                        <div className="text-sm font-mono font-bold text-neon-green">
+                            {gapData ? formatPrice(gapData.binance) : '--'}
+                        </div>
                     </div>
                     <div>
-                        <span className="text-[9px] text-text-muted uppercase">Gap</span>
-                        <span className={`text-xl font-mono font-bold ml-2 ${gapData && gapData.gap_percent > 0 ? 'text-neon-green' : 'text-danger'}`}>
-                            {gapData ? (gapData.gap_percent > 0 ? '+' : '') + gapData.gap_percent.toFixed(3) : '--'}%
-                        </span>
+                        <div className="text-[8px] text-text-muted">POLYMARKET</div>
+                        <div className="text-sm font-mono font-bold text-danger">
+                            {gapData ? formatPrice(gapData.poly_implied) : '--'}
+                        </div>
                     </div>
-                    <span className={`text-[10px] font-mono ${gapData && gapData.gap_percent > 0 ? 'text-neon-green' : 'text-danger'}`}>
-                        {gapDirection}
-                    </span>
-                </div>
-            </div>
-
-            {/* Price Display */}
-            <div className="grid grid-cols-2 gap-2 mb-3">
-                <div className="p-2 bg-void border border-neon-green/30 rounded">
-                    <div className="text-[9px] text-neon-green uppercase tracking-wider">Binance</div>
-                    <div className="text-base font-mono font-semibold text-neon-green">
-                        {gapData ? formatPrice(gapData.binance) : '--'}
+                    <div>
+                        <div className="text-[8px] text-text-muted">EDGE</div>
+                        <div className={`text-sm font-mono font-bold ${scanStatus && scanStatus.edge_percent > 3.5 ? 'text-neon-green' : 'text-warning'}`}>
+                            {scanStatus ? `${scanStatus.edge_percent.toFixed(2)}%` : '--'}
+                        </div>
                     </div>
-                </div>
-                <div className="p-2 bg-void border border-danger/30 rounded">
-                    <div className="text-[9px] text-danger uppercase tracking-wider">Polymarket</div>
-                    <div className="text-base font-mono font-semibold text-danger">
-                        {gapData ? formatPrice(gapData.poly_implied) : '--'}
+                    <div>
+                        <div className="text-[8px] text-text-muted">SPREAD</div>
+                        <div className={`text-sm font-mono font-bold ${scanStatus && scanStatus.spread < 0.05 ? 'text-neon-green' : 'text-danger'}`}>
+                            ${scanStatus ? scanStatus.spread.toFixed(3) : '--'}
+                        </div>
                     </div>
                 </div>
             </div>
 
-            {/* Toggle between Chart and Signals Table */}
-            {showChart ? (
-                /* Live Heartbeat Chart */
-                <div className="flex-1 min-h-[180px]">
-                    <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">
-                        Live Heartbeat
+            {/* Main Content Area */}
+            <div className="flex-1 min-h-0 overflow-hidden">
+                {view === 'gates' && (
+                    <div className="h-full flex flex-col">
+                        {/* Current Status */}
+                        <div className="mb-2 p-2 bg-void border border-border-dark rounded text-center">
+                            {scanStatus?.reject_reason ? (
+                                <div className={`text-lg font-mono font-bold ${getRejectLabel(scanStatus.reject_reason)?.color}`}>
+                                    {getRejectLabel(scanStatus.reject_reason)?.text}
+                                </div>
+                            ) : scanStatus && !scanStatus.reject_reason ? (
+                                <div className="text-lg font-mono font-bold text-neon-green animate-pulse">
+                                    GOD CANDLE!
+                                </div>
+                            ) : (
+                                <div className="text-lg font-mono text-text-muted">
+                                    SCANNING...
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Three Gates */}
+                        <div className="flex-1 grid grid-rows-3 gap-2">
+                            {scanStatus ? (
+                                <>
+                                    <GateIndicator gate={scanStatus.impulse} label="Gate A: Impulse (0.5% in 10s)" />
+                                    <GateIndicator gate={scanStatus.trap} label="Gate B: Trap ($0.05 spread)" />
+                                    <GateIndicator gate={scanStatus.fee} label="Gate C: Fee (3.5% edge)" />
+                                </>
+                            ) : (
+                                <>
+                                    <div className="p-2 rounded border border-border-dark bg-void animate-pulse">
+                                        <div className="text-[9px] text-text-muted">Gate A: Impulse</div>
+                                        <div className="text-[10px] text-text-muted">Waiting for data...</div>
+                                    </div>
+                                    <div className="p-2 rounded border border-border-dark bg-void animate-pulse">
+                                        <div className="text-[9px] text-text-muted">Gate B: Trap</div>
+                                        <div className="text-[10px] text-text-muted">Waiting for data...</div>
+                                    </div>
+                                    <div className="p-2 rounded border border-border-dark bg-void animate-pulse">
+                                        <div className="text-[9px] text-text-muted">Gate C: Fee</div>
+                                        <div className="text-[10px] text-text-muted">Waiting for data...</div>
+                                    </div>
+                                </>
+                            )}
+                        </div>
                     </div>
-                    <div className="h-[calc(100%-16px)] bg-void border border-border-dark rounded p-2">
+                )}
+
+                {view === 'chart' && (
+                    <div className="h-full bg-void border border-border-dark rounded p-2">
                         {chartData.length > 1 ? (
                             <ResponsiveContainer width="100%" height="100%">
-                                <LineChart
-                                    data={chartData}
-                                    margin={{ top: 5, right: 5, bottom: 5, left: -20 }}
-                                >
+                                <LineChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: -20 }}>
                                     <XAxis
                                         dataKey="time"
                                         tick={{ fill: '#666', fontSize: 8 }}
@@ -240,81 +299,64 @@ export function ArbLogTable() {
                                     />
                                     <Tooltip content={<CustomTooltip />} />
                                     <ReferenceLine y={0} stroke="#333" strokeDasharray="3 3" />
-                                    <Line
-                                        type="monotone"
-                                        dataKey="binance"
-                                        stroke="#00FF41"
-                                        strokeWidth={2}
-                                        dot={false}
-                                        isAnimationActive={false}
-                                    />
-                                    <Line
-                                        type="monotone"
-                                        dataKey="polymarket"
-                                        stroke="#ff4444"
-                                        strokeWidth={2}
-                                        dot={false}
-                                        isAnimationActive={false}
-                                    />
+                                    <Line type="monotone" dataKey="binance" stroke="#00FF41" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                    <Line type="monotone" dataKey="polymarket" stroke="#ff4444" strokeWidth={2} dot={false} isAnimationActive={false} />
                                 </LineChart>
                             </ResponsiveContainer>
                         ) : (
-                            <div className="h-full flex items-center justify-center text-text-muted text-sm">
+                            <div className="h-full flex items-center justify-center text-text-muted">
                                 <div className="text-center">
                                     <div className="animate-pulse text-xl mb-1">...</div>
-                                    <div className="text-[10px]">Waiting for data</div>
+                                    <div className="text-[10px]">Accumulating data</div>
                                 </div>
                             </div>
                         )}
                     </div>
-                </div>
-            ) : (
-                /* Trade Signals Table */
-                <div className="flex-1 min-h-[180px] flex flex-col">
-                    <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1 flex justify-between">
-                        <span>Trade Signals</span>
-                        <span className="text-gold">{signals.length} detected</span>
-                    </div>
-                    <div className="flex-1 overflow-auto bg-void border border-border-dark rounded">
+                )}
+
+                {view === 'signals' && (
+                    <div className="h-full overflow-auto bg-void border border-border-dark rounded">
                         {signals.length > 0 ? (
-                            <table className="w-full text-[10px]">
+                            <table className="w-full text-[9px]">
                                 <thead className="sticky top-0 bg-void-light">
                                     <tr className="text-left text-text-secondary border-b border-border-dark">
-                                        <th className="font-mono font-normal py-1.5 px-2">TIME</th>
-                                        <th className="font-mono font-normal py-1.5 px-2">STRATEGY</th>
-                                        <th className="font-mono font-normal py-1.5 px-2">MARKET</th>
-                                        <th className="font-mono font-normal py-1.5 px-2 text-right">EV</th>
-                                        <th className="font-mono font-normal py-1.5 px-2 text-right">EDGE</th>
-                                        <th className="font-mono font-normal py-1.5 px-2">STATUS</th>
+                                        <th className="font-mono font-normal py-1 px-2">TIME</th>
+                                        <th className="font-mono font-normal py-1 px-2">TYPE</th>
+                                        <th className="font-mono font-normal py-1 px-2">DIR</th>
+                                        <th className="font-mono font-normal py-1 px-2 text-right">EDGE</th>
+                                        <th className="font-mono font-normal py-1 px-2">GATES</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {signals.map((signal) => (
                                         <tr
                                             key={signal.id}
-                                            className={`border-b border-border-dark/50 hover:bg-void-light transition-colors ${getSignalRowClass(signal.signal_type)}`}
+                                            className={`border-b border-border-dark/50 ${
+                                                signal.signal_type === 'GOD_CANDLE'
+                                                    ? 'bg-neon-green/10 border-l-2 border-l-neon-green'
+                                                    : ''
+                                            }`}
                                         >
-                                            <td className="font-mono py-1.5 px-2 text-text-secondary">
-                                                {signal.time}
+                                            <td className="font-mono py-1 px-2 text-text-secondary">{signal.time}</td>
+                                            <td className="font-mono py-1 px-2">
+                                                {signal.signal_type === 'GOD_CANDLE' ? (
+                                                    <span className="text-neon-green font-bold">GOD CANDLE</span>
+                                                ) : (
+                                                    <span className="text-text-muted">{signal.signal_type}</span>
+                                                )}
                                             </td>
-                                            <td className="font-mono py-1.5 px-2">
-                                                <span className={`px-1.5 py-0.5 rounded border text-[9px] ${getSignalBadgeClass(signal.signal_type)}`}>
-                                                    {signal.signal_type}
-                                                </span>
+                                            <td className={`font-mono py-1 px-2 font-bold ${signal.direction === 'BUY_YES' ? 'text-neon-green' : 'text-danger'}`}>
+                                                {signal.direction === 'BUY_YES' ? 'YES' : signal.direction === 'BUY_NO' ? 'NO' : '--'}
                                             </td>
-                                            <td className="font-mono py-1.5 px-2 text-text-primary">
-                                                {signal.market}
-                                            </td>
-                                            <td className="font-mono py-1.5 px-2 text-right text-gold font-semibold">
-                                                ${signal.ev_dollars.toFixed(2)}
-                                            </td>
-                                            <td className={`font-mono py-1.5 px-2 text-right font-semibold ${signal.edge_percent > 5 ? 'text-neon-green' : 'text-blue-400'}`}>
+                                            <td className="font-mono py-1 px-2 text-right text-gold font-bold">
                                                 +{signal.edge_percent.toFixed(1)}%
                                             </td>
-                                            <td className="font-mono py-1.5 px-2">
-                                                <span className="text-warning animate-pulse">
-                                                    {signal.status}
-                                                </span>
+                                            <td className="font-mono py-1 px-2">
+                                                <div className="flex gap-1">
+                                                    <span className={signal.impulse_status === 'PASS' ? 'text-neon-green' : 'text-danger'}>I</span>
+                                                    <span className={signal.trap_status === 'PASS' ? 'text-neon-green' : 'text-danger'}>T</span>
+                                                    <span className={signal.fee_status === 'PASS' ? 'text-neon-green' : 'text-danger'}>F</span>
+                                                </div>
                                             </td>
                                         </tr>
                                     ))}
@@ -323,45 +365,25 @@ export function ArbLogTable() {
                         ) : (
                             <div className="h-full flex items-center justify-center text-text-muted">
                                 <div className="text-center">
-                                    <div className="text-2xl mb-2">SCANNING</div>
-                                    <div className="text-[10px]">Waiting for opportunities...</div>
+                                    <div className="text-xl mb-2">WAITING</div>
+                                    <div className="text-[10px]">No God Candles yet...</div>
                                 </div>
                             </div>
                         )}
                     </div>
-                </div>
-            )}
-
-            {/* Legend */}
-            <div className="mt-2 flex justify-center gap-4 text-[9px]">
-                <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-neon-green"></span>
-                    <span className="text-neon-green">NEG-RISK</span>
-                </div>
-                <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                    <span className="text-blue-400">LAT-LAG</span>
-                </div>
-                <div className="flex items-center gap-1">
-                    <span className="w-2 h-0.5 bg-neon-green"></span>
-                    <span className="text-text-muted">BINANCE</span>
-                </div>
-                <div className="flex items-center gap-1">
-                    <span className="w-2 h-0.5 bg-danger"></span>
-                    <span className="text-text-muted">POLY</span>
-                </div>
+                )}
             </div>
 
-            {/* Footer Stats */}
-            <div className="mt-2 pt-2 border-t border-border-dark flex justify-between text-[9px]">
+            {/* Footer */}
+            <div className="mt-2 pt-2 border-t border-border-dark flex justify-between text-[8px]">
                 <div className="text-text-secondary">
-                    <span className="text-neon-green font-mono">{priceHistory.length}</span> samples
+                    <span className="text-neon-green font-mono">{priceHistory.length}</span> ticks
                 </div>
                 <div className="text-text-secondary">
-                    <span className="text-gold font-mono">{signals.length}</span> signals
+                    <span className="text-gold font-mono">{godCandleCount}</span> god candles
                 </div>
                 <div className="text-text-secondary">
-                    avg lag: <span className="text-gold font-mono">{avgLatency}ms</span>
+                    lag: <span className="text-gold font-mono">{avgLatency}ms</span>
                 </div>
             </div>
         </div>

@@ -15,7 +15,7 @@ from collections import deque
 
 import aiohttp
 
-from .math_engine import FairValueCalculator, TradeSignal
+from .math_engine import FairValueCalculator, TradeSignal, OpportunityScanner, GateStatus
 
 
 @dataclass
@@ -242,12 +242,14 @@ class IngestionEngine:
         # Price history for visualization (last 100 points)
         self.price_history: deque = deque(maxlen=100)
 
-        # Math Engine for signal detection
-        self.calculator = FairValueCalculator()
+        # $912k Wallet Strategy Scanner
+        self.scanner = OpportunityScanner()
 
         # Signal tracking
         self.last_signal_time: float = 0
-        self.signal_cooldown_ms: float = 2000  # Min 2s between signals
+        self.signal_cooldown_ms: float = 5000  # Min 5s between signals (prevent spam)
+        self.last_scan_broadcast: float = 0
+        self.scan_broadcast_interval: float = 500  # Broadcast scan status every 500ms
 
         # Link streams for simulation
         self.polymarket.set_binance_reference(self.binance)
@@ -271,11 +273,9 @@ class IngestionEngine:
     async def _broadcast_loop(self):
         """
         Broadcast gap data to frontend at 10Hz (100ms interval)
-        This is the core "Reality Gap" visualization feed
-        Also scans for trade signals using the Math Engine
+        Runs the $912k Wallet Strategy scanner on every tick
         """
         print("[INGEST] Starting 10Hz broadcast loop...")
-        print("[MATH] Fair Value Calculator initialized")
 
         # Wait for initial data
         await asyncio.sleep(1)
@@ -285,14 +285,16 @@ class IngestionEngine:
                 gap_data = self._calculate_gap()
 
                 if gap_data:
-                    # Build payload for frontend
+                    current_time = time.time() * 1000
+
+                    # Build gap payload for frontend
                     payload = {
                         "type": "gap_monitor",
                         "binance": gap_data.binance_price,
                         "poly_implied": gap_data.poly_implied,
                         "gap_percent": gap_data.gap_percent,
                         "latency_delta_ms": gap_data.latency_delta_ms,
-                        "timestamp": int(time.time() * 1000),
+                        "timestamp": int(current_time),
                         "binance_ts": gap_data.binance_ts,
                         "poly_ts": gap_data.poly_ts
                     }
@@ -300,8 +302,8 @@ class IngestionEngine:
                     # Broadcast gap data
                     await self.broadcast(payload)
 
-                    # Scan for trade signals (with cooldown)
-                    await self._scan_for_signals(gap_data)
+                    # Run the $912k Strategy Scanner
+                    await self._run_scanner(gap_data, current_time)
 
             except Exception as e:
                 print(f"[INGEST] Broadcast error: {e}")
@@ -309,81 +311,126 @@ class IngestionEngine:
             # 100ms interval = 10Hz
             await asyncio.sleep(0.1)
 
-    async def _scan_for_signals(self, gap_data: GapData):
+    async def _run_scanner(self, gap_data: GapData, current_time: float):
         """
-        Use Math Engine to scan for arbitrage opportunities
+        Run the $912k Wallet Strategy Scanner
+
+        State Machine:
+        1. Update Prices
+        2. Check IMPULSE (Is Binance moving fast?)
+        3. Check TRAP (Is Poly broken?)
+        4. Check FEE (Is it worth it?)
+        5. Emit Signal only if ALL pass
         """
-        current_time = time.time() * 1000
+        # Simulate order book for spread calculation
+        best_bid, best_ask = self._simulate_order_book(gap_data.poly_implied)
 
-        # Cooldown check - avoid signal spam
-        if current_time - self.last_signal_time < self.signal_cooldown_ms:
-            return
-
-        # Simulate order book data for negative risk detection
-        # In production, this would come from actual Polymarket CLOB
-        yes_ask, no_ask = self._simulate_order_book(gap_data.poly_implied)
-
-        # Scan all markets
-        signals = self.calculator.scan_all_markets(
+        # Run the three-gate scan
+        scan_result = self.scanner.scan(
             binance_price=gap_data.binance_price,
             poly_implied=gap_data.poly_implied,
-            yes_ask=yes_ask,
-            no_ask=no_ask
+            best_bid=best_bid,
+            best_ask=best_ask,
+            timestamp=current_time
         )
 
-        # Broadcast any detected signals
-        for signal in signals:
+        # Broadcast scan status periodically (not every tick to reduce noise)
+        if current_time - self.last_scan_broadcast > self.scan_broadcast_interval:
+            self.last_scan_broadcast = current_time
+
+            scan_payload = {
+                "type": "scan_status",
+                "timestamp": current_time,
+                "impulse": {
+                    "status": scan_result.impulse_gate.status.value,
+                    "value": round(scan_result.impulse_gate.value * 100, 3),
+                    "message": scan_result.impulse_gate.message
+                },
+                "trap": {
+                    "status": scan_result.trap_gate.status.value,
+                    "value": round(scan_result.trap_gate.value, 4),
+                    "message": scan_result.trap_gate.message
+                },
+                "fee": {
+                    "status": scan_result.fee_gate.status.value,
+                    "value": round(scan_result.fee_gate.value * 100, 2),
+                    "message": scan_result.fee_gate.message
+                },
+                "reject_reason": scan_result.reject_reason.value if scan_result.reject_reason else None,
+                "edge_percent": round(scan_result.edge_percent, 2),
+                "spread": round(scan_result.spread, 4)
+            }
+            await self.broadcast(scan_payload)
+
+        # If all gates pass, emit a GOD CANDLE signal
+        if scan_result.all_passed:
+            # Cooldown check
+            if current_time - self.last_signal_time < self.signal_cooldown_ms:
+                return
+
             self.last_signal_time = current_time
 
+            # Build signal payload
             signal_payload = {
                 "type": "trade_signal",
-                "signal": signal.to_dict()
+                "signal": {
+                    "id": f"GOD-{int(current_time)}",
+                    "timestamp": current_time,
+                    "time": time.strftime("%H:%M:%S"),
+                    "signal_type": "GOD_CANDLE",
+                    "direction": scan_result.direction,
+                    "market": "BTC-100K",
+                    "binance_price": scan_result.binance_price,
+                    "poly_price": scan_result.poly_price,
+                    "edge_percent": scan_result.edge_percent,
+                    "confidence": scan_result.confidence,
+                    "impulse_status": "PASS",
+                    "trap_status": "PASS",
+                    "fee_status": "PASS",
+                    "status": "VALID"
+                }
             }
 
-            print(f"[SIGNAL] {signal.signal_type.value} detected: {signal.market} | Edge: {signal.edge_percent:.2f}% | EV: ${signal.ev_dollars:.2f}")
+            print(f"[GOD CANDLE] {scan_result.direction} | Edge: {scan_result.edge_percent:.2f}% | Confidence: {scan_result.confidence:.0%}")
             await self.broadcast(signal_payload)
 
-            # Also send an opportunity alert
+            # Send alert
             alert_payload = {
                 "type": "opportunity_alert",
-                "message": f"OPPORTUNITY DETECTED: {signal.signal_type.value}",
-                "market": signal.market,
-                "edge": signal.edge_percent,
-                "direction": signal.direction.value,
-                "timestamp": signal.timestamp
+                "message": "GOD CANDLE DETECTED!",
+                "direction": scan_result.direction,
+                "edge": scan_result.edge_percent,
+                "timestamp": current_time
             }
             await self.broadcast(alert_payload)
 
     def _simulate_order_book(self, poly_implied: float) -> tuple[float, float]:
         """
-        Simulate Polymarket order book prices.
-        In production, fetch real order book data.
+        Simulate Polymarket order book (bid/ask).
+        In production, this would fetch real CLOB data.
 
-        Occasionally simulates negative risk opportunities for demo.
+        Returns (best_bid, best_ask) for spread calculation.
         """
         # Base probability from implied price
-        # For a ~$100k strike, calculate rough probability
         strike = 100000
         base_prob = max(0.1, min(0.9, (poly_implied - 90000) / 20000))
 
-        # YES ask is slightly above fair value (ask spread)
-        yes_ask = base_prob + random.uniform(0.01, 0.03)
+        # Normal market: tight spread (1-3 cents)
+        spread = random.uniform(0.01, 0.03)
+        best_bid = base_prob - spread / 2
+        best_ask = base_prob + spread / 2
 
-        # NO ask is slightly above (1 - fair value)
-        no_ask = (1 - base_prob) + random.uniform(0.01, 0.03)
+        # Occasionally simulate a TRAP (5% chance) - wide spread
+        if random.random() < 0.05:
+            spread = random.uniform(0.06, 0.15)  # 6-15 cent spread
+            best_bid = base_prob - spread / 2
+            best_ask = base_prob + spread / 2
 
-        # Occasionally create negative risk opportunity (1% chance per tick)
-        if random.random() < 0.01:
-            # Make YES + NO < 0.99 for guaranteed profit
-            discount = random.uniform(0.02, 0.05)
-            yes_ask = base_prob - discount / 2
-            no_ask = (1 - base_prob) - discount / 2
+        return round(best_bid, 4), round(best_ask, 4)
 
-        return round(yes_ask, 4), round(no_ask, 4)
-
-    def get_recent_signals(self) -> List[dict]:
-        """Get recent signals from the calculator"""
-        return self.calculator.get_recent_signals(limit=20)
+    def get_scanner_stats(self) -> dict:
+        """Get scanner statistics"""
+        return self.scanner.get_stats()
 
     def _calculate_gap(self) -> Optional[GapData]:
         """Calculate the Reality Gap between exchanges"""
