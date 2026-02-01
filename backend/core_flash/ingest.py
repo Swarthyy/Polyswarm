@@ -16,6 +16,7 @@ from collections import deque
 import aiohttp
 
 from .math_engine import FairValueCalculator, TradeSignal, OpportunityScanner, GateStatus
+from .executor import TradeExecutor
 
 
 @dataclass
@@ -254,6 +255,9 @@ class IngestionEngine:
         # Link streams for simulation
         self.polymarket.set_binance_reference(self.binance)
 
+        # Execution Engine (The Fee Crusher)
+        self.executor = TradeExecutor(broadcast_callback=self.broadcast)
+
     async def start(self):
         """Start the ingestion engine with all streams"""
         self._running = True
@@ -403,6 +407,11 @@ class IngestionEngine:
                 "timestamp": current_time
             }
             await self.broadcast(alert_payload)
+
+            # EXECUTE TRADE (Fee Crusher Trigger)
+            # This is the moment we pull the trigger
+            print("[INGEST] Triggering execution engine...")
+            asyncio.create_task(self.executor.execute_trade(signal_payload["signal"]))
 
     def _simulate_order_book(self, poly_implied: float) -> tuple[float, float]:
         """

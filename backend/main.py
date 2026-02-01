@@ -196,8 +196,42 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "latency_delta_ms": gap_data.latency_delta_ms
                             })
 
+                # Kill Switch Command
+                elif message.get("type") == "kill_switch":
+                    action = message.get("action")
+                    if ingestion_engine and ingestion_engine.executor:
+                        if action == "DISABLE":
+                            ingestion_engine.executor.disable_trading()
+                            await manager.broadcast({
+                                "type": "system_alert",
+                                "message": "⚠️ KILL SWITCH ENGAGED - TRADING DISABLED",
+                                "level": "CRITICAL"
+                            })
+                        elif action == "ENABLE":
+                            ingestion_engine.executor.enable_trading()
+                            await manager.broadcast({
+                                "type": "system_alert",
+                                "message": "✅ KILL SWITCH RELEASED - TRADING ENABLED",
+                                "level": "INFO"
+                            })
+                        
+                        # Send updated status
+                        await websocket.send_json({
+                            "type": "executor_status",
+                            "status": ingestion_engine.executor.get_status()
+                        })
+
             except json.JSONDecodeError:
                 pass
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+@app.get("/status/execution")
+async def execution_status():
+    """Get detailed execution engine status"""
+    if not ingestion_engine or not ingestion_engine.executor:
+        return {"status": "inactive", "message": "Executor not initialized"}
+    
+    return ingestion_engine.executor.get_status()

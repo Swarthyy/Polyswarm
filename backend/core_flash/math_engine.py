@@ -136,9 +136,11 @@ class OpportunityScanner:
     """
 
     # === STRATEGY THRESHOLDS (The $912k Parameters) ===
+    #
+    # PRODUCTION MODE - Pipeline verified, back to sniper settings
 
     # Gate A: Impulse Filter
-    IMPULSE_THRESHOLD = 0.005      # 0.5% move required
+    IMPULSE_THRESHOLD = 0.005      # 0.5% move required (God Candle)
     IMPULSE_WINDOW_MS = 10000      # Look back 10 seconds
     PRICE_HISTORY_MS = 60000       # Keep 60 seconds of history
 
