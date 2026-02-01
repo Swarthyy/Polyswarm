@@ -27,3 +27,4 @@ env/
 # Project Specific
 backend/.python-version
 frontend/.eslintcache
+.claude/
