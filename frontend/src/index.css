@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+/* PolySwarm 2.0 - War Room Theme */
+@theme {
+  /* Background */
+  --color-void: #050505;
+  --color-void-light: #0a0a0a;
+  
+  /* Core A: Flash (Arbitrage) */
+  --color-neon-green: #00FF41;
+  --color-neon-green-dim: #00cc34;
+  --color-neon-green-glow: rgba(0, 255, 65, 0.3);
+  
+  /* Core B: Swarm (AI) */
+  --color-gold: #FFD700;
+  --color-gold-dim: #ccac00;
+  --color-gold-glow: rgba(255, 215, 0, 0.3);
+  
+  /* Borders & UI */
+  --color-border-dark: #333333;
+  --color-border-light: #444444;
+  
+  /* Status */
+  --color-danger: #ff4444;
+  --color-warning: #ffaa00;
+  --color-success: #00FF41;
+  
+  /* Text */
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #888888;
+  --color-text-muted: #555555;
+  
+  /* Fonts */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Import Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+/* Base Styles */
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--color-void);
+  color: var(--color-text-primary);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Data/Code Font */
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Glow Effects */
+.glow-green {
+  box-shadow: 0 0 10px var(--color-neon-green-glow),
+              0 0 20px var(--color-neon-green-glow),
+              0 0 30px var(--color-neon-green-glow);
+}
+
+.glow-gold {
+  box-shadow: 0 0 10px var(--color-gold-glow),
+              0 0 20px var(--color-gold-glow),
+              0 0 30px var(--color-gold-glow);
+}
+
+.text-glow-green {
+  text-shadow: 0 0 10px var(--color-neon-green-glow);
+}
+
+.text-glow-gold {
+  text-shadow: 0 0 10px var(--color-gold-glow);
+}
+
+/* Blinking Animation */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.blink {
+  animation: blink 1s step-end infinite;
+}
+
+/* Pulse Animation */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-void);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-dark);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-light);
+}
