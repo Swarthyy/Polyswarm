@@ -2,16 +2,20 @@
 PolySwarm 2.0 - Ingestion Engine
 Dual-socket connection to Binance (real-time) and Polymarket (CLOB)
 Calculates and broadcasts the "Reality Gap" between exchanges
+Integrates Math Engine for signal detection
 """
 
 import asyncio
 import json
 import time
+import random
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, List
 from collections import deque
 
 import aiohttp
+
+from .math_engine import FairValueCalculator, TradeSignal
 
 
 @dataclass
@@ -226,6 +230,7 @@ class IngestionEngine:
     """
     The Reality Gap Monitor
     Orchestrates dual-stream data ingestion and gap calculation
+    Integrates Math Engine for trade signal detection
     """
 
     def __init__(self, broadcast_callback: Callable):
@@ -236,6 +241,13 @@ class IngestionEngine:
 
         # Price history for visualization (last 100 points)
         self.price_history: deque = deque(maxlen=100)
+
+        # Math Engine for signal detection
+        self.calculator = FairValueCalculator()
+
+        # Signal tracking
+        self.last_signal_time: float = 0
+        self.signal_cooldown_ms: float = 2000  # Min 2s between signals
 
         # Link streams for simulation
         self.polymarket.set_binance_reference(self.binance)
@@ -260,8 +272,10 @@ class IngestionEngine:
         """
         Broadcast gap data to frontend at 10Hz (100ms interval)
         This is the core "Reality Gap" visualization feed
+        Also scans for trade signals using the Math Engine
         """
         print("[INGEST] Starting 10Hz broadcast loop...")
+        print("[MATH] Fair Value Calculator initialized")
 
         # Wait for initial data
         await asyncio.sleep(1)
@@ -283,14 +297,93 @@ class IngestionEngine:
                         "poly_ts": gap_data.poly_ts
                     }
 
-                    # Broadcast to all connected clients
+                    # Broadcast gap data
                     await self.broadcast(payload)
+
+                    # Scan for trade signals (with cooldown)
+                    await self._scan_for_signals(gap_data)
 
             except Exception as e:
                 print(f"[INGEST] Broadcast error: {e}")
 
             # 100ms interval = 10Hz
             await asyncio.sleep(0.1)
+
+    async def _scan_for_signals(self, gap_data: GapData):
+        """
+        Use Math Engine to scan for arbitrage opportunities
+        """
+        current_time = time.time() * 1000
+
+        # Cooldown check - avoid signal spam
+        if current_time - self.last_signal_time < self.signal_cooldown_ms:
+            return
+
+        # Simulate order book data for negative risk detection
+        # In production, this would come from actual Polymarket CLOB
+        yes_ask, no_ask = self._simulate_order_book(gap_data.poly_implied)
+
+        # Scan all markets
+        signals = self.calculator.scan_all_markets(
+            binance_price=gap_data.binance_price,
+            poly_implied=gap_data.poly_implied,
+            yes_ask=yes_ask,
+            no_ask=no_ask
+        )
+
+        # Broadcast any detected signals
+        for signal in signals:
+            self.last_signal_time = current_time
+
+            signal_payload = {
+                "type": "trade_signal",
+                "signal": signal.to_dict()
+            }
+
+            print(f"[SIGNAL] {signal.signal_type.value} detected: {signal.market} | Edge: {signal.edge_percent:.2f}% | EV: ${signal.ev_dollars:.2f}")
+            await self.broadcast(signal_payload)
+
+            # Also send an opportunity alert
+            alert_payload = {
+                "type": "opportunity_alert",
+                "message": f"OPPORTUNITY DETECTED: {signal.signal_type.value}",
+                "market": signal.market,
+                "edge": signal.edge_percent,
+                "direction": signal.direction.value,
+                "timestamp": signal.timestamp
+            }
+            await self.broadcast(alert_payload)
+
+    def _simulate_order_book(self, poly_implied: float) -> tuple[float, float]:
+        """
+        Simulate Polymarket order book prices.
+        In production, fetch real order book data.
+
+        Occasionally simulates negative risk opportunities for demo.
+        """
+        # Base probability from implied price
+        # For a ~$100k strike, calculate rough probability
+        strike = 100000
+        base_prob = max(0.1, min(0.9, (poly_implied - 90000) / 20000))
+
+        # YES ask is slightly above fair value (ask spread)
+        yes_ask = base_prob + random.uniform(0.01, 0.03)
+
+        # NO ask is slightly above (1 - fair value)
+        no_ask = (1 - base_prob) + random.uniform(0.01, 0.03)
+
+        # Occasionally create negative risk opportunity (1% chance per tick)
+        if random.random() < 0.01:
+            # Make YES + NO < 0.99 for guaranteed profit
+            discount = random.uniform(0.02, 0.05)
+            yes_ask = base_prob - discount / 2
+            no_ask = (1 - base_prob) - discount / 2
+
+        return round(yes_ask, 4), round(no_ask, 4)
+
+    def get_recent_signals(self) -> List[dict]:
+        """Get recent signals from the calculator"""
+        return self.calculator.get_recent_signals(limit=20)
 
     def _calculate_gap(self) -> Optional[GapData]:
         """Calculate the Reality Gap between exchanges"""

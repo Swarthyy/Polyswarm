@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState, useEffect, useCallback } from 'react'
 import {
     LineChart,
     Line,
@@ -19,19 +19,36 @@ interface NormalizedPoint {
     rawPoly: number
 }
 
+interface TradeSignal {
+    id: string
+    timestamp: number
+    time: string
+    signal_type: 'Lat-Lag' | 'Neg-Risk'
+    direction: string
+    market: string
+    binance_price: number
+    fair_value: number
+    market_price: number
+    edge_percent: number
+    ev_dollars: number
+    confidence: number
+    yes_ask: number | null
+    no_ask: number | null
+    cost_basis: number | null
+    status: string
+}
+
 function normalizeData(history: GapMonitorData[]): NormalizedPoint[] {
     if (history.length === 0) return []
 
-    // Get baseline (first price) for normalization
     const baseline = history[0].binance
 
-    return history.map((point, index) => ({
+    return history.map((point) => ({
         time: new Date(point.timestamp).toLocaleTimeString('en-US', {
             hour12: false,
             minute: '2-digit',
             second: '2-digit'
         }),
-        // Normalize to percentage deviation from baseline
         binance: ((point.binance - baseline) / baseline) * 100,
         polymarket: ((point.poly_implied - baseline) / baseline) * 100,
         gap: point.gap_percent,
@@ -81,156 +98,267 @@ function CustomTooltip({ active, payload }: TooltipProps) {
 
 export function ArbLogTable() {
     const { gapData, priceHistory, isConnected } = useGapMonitor()
+    const [signals, setSignals] = useState<TradeSignal[]>([])
+    const [showChart, setShowChart] = useState(true)
+
+    // Listen for trade signals via separate WebSocket message handler
+    useEffect(() => {
+        const ws = new WebSocket('ws://localhost:8000/ws')
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data)
+                if (data.type === 'trade_signal' && data.signal) {
+                    setSignals(prev => {
+                        const updated = [data.signal, ...prev]
+                        return updated.slice(0, 20) // Keep last 20 signals
+                    })
+                }
+            } catch {
+                // Ignore parse errors
+            }
+        }
+
+        return () => ws.close()
+    }, [])
 
     const chartData = useMemo(() => normalizeData(priceHistory), [priceHistory])
 
-    // Calculate average latency delta
     const avgLatency = useMemo(() => {
         if (priceHistory.length === 0) return 0
         const sum = priceHistory.reduce((acc, p) => acc + p.latency_delta_ms, 0)
         return Math.round(sum / priceHistory.length)
     }, [priceHistory])
 
-    // Get current gap direction
     const gapDirection = gapData
         ? gapData.gap_percent > 0 ? 'BINANCE LEADS' : 'POLY LEADS'
         : '--'
 
+    const getSignalRowClass = useCallback((signalType: string) => {
+        if (signalType === 'Neg-Risk') {
+            return 'bg-neon-green/10 border-l-2 border-neon-green'
+        }
+        if (signalType === 'Lat-Lag') {
+            return 'bg-blue-500/10 border-l-2 border-blue-500'
+        }
+        return ''
+    }, [])
+
+    const getSignalBadgeClass = useCallback((signalType: string) => {
+        if (signalType === 'Neg-Risk') {
+            return 'bg-neon-green/20 text-neon-green border-neon-green/50'
+        }
+        if (signalType === 'Lat-Lag') {
+            return 'bg-blue-500/20 text-blue-400 border-blue-500/50'
+        }
+        return 'bg-text-muted/20 text-text-muted'
+    }, [])
+
     return (
         <div className="h-full flex flex-col">
-            {/* Header */}
+            {/* Header with toggle */}
             <div className="text-[10px] text-text-muted uppercase tracking-wider mb-3 flex items-center justify-between">
-                <span>Reality Gap Monitor</span>
+                <div className="flex items-center gap-3">
+                    <span>Core A: Math Engine</span>
+                    <button
+                        onClick={() => setShowChart(!showChart)}
+                        className="text-[9px] px-2 py-0.5 border border-border-dark rounded hover:border-neon-green/50 transition-colors"
+                    >
+                        {showChart ? 'SIGNALS' : 'CHART'}
+                    </button>
+                </div>
                 <span className={isConnected ? 'text-neon-green' : 'text-danger'}>
                     {isConnected ? '● STREAMING' : '○ DISCONNECTED'}
                 </span>
             </div>
 
             {/* Latency Delta Display */}
-            <div className="mb-4 p-3 bg-void border border-border-dark rounded">
-                <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">
-                    Latency Delta
-                </div>
+            <div className="mb-3 p-2 bg-void border border-border-dark rounded">
                 <div className="flex items-baseline justify-between">
-                    <span className="text-3xl font-mono font-bold text-gold">
-                        {gapData ? Math.round(gapData.latency_delta_ms) : '--'}
-                        <span className="text-sm text-text-secondary ml-1">ms</span>
-                    </span>
-                    <span className={`text-xs font-mono ${gapData && gapData.gap_percent > 0 ? 'text-neon-green' : 'text-danger'}`}>
+                    <div>
+                        <span className="text-[9px] text-text-muted uppercase">Latency</span>
+                        <span className="text-xl font-mono font-bold text-gold ml-2">
+                            {gapData ? Math.round(gapData.latency_delta_ms) : '--'}
+                            <span className="text-xs text-text-secondary ml-1">ms</span>
+                        </span>
+                    </div>
+                    <div>
+                        <span className="text-[9px] text-text-muted uppercase">Gap</span>
+                        <span className={`text-xl font-mono font-bold ml-2 ${gapData && gapData.gap_percent > 0 ? 'text-neon-green' : 'text-danger'}`}>
+                            {gapData ? (gapData.gap_percent > 0 ? '+' : '') + gapData.gap_percent.toFixed(3) : '--'}%
+                        </span>
+                    </div>
+                    <span className={`text-[10px] font-mono ${gapData && gapData.gap_percent > 0 ? 'text-neon-green' : 'text-danger'}`}>
                         {gapDirection}
                     </span>
                 </div>
             </div>
 
             {/* Price Display */}
-            <div className="grid grid-cols-2 gap-2 mb-4">
+            <div className="grid grid-cols-2 gap-2 mb-3">
                 <div className="p-2 bg-void border border-neon-green/30 rounded">
-                    <div className="text-[9px] text-neon-green uppercase tracking-wider mb-1">
-                        Binance BTC
-                    </div>
-                    <div className="text-lg font-mono font-semibold text-neon-green">
+                    <div className="text-[9px] text-neon-green uppercase tracking-wider">Binance</div>
+                    <div className="text-base font-mono font-semibold text-neon-green">
                         {gapData ? formatPrice(gapData.binance) : '--'}
                     </div>
                 </div>
                 <div className="p-2 bg-void border border-danger/30 rounded">
-                    <div className="text-[9px] text-danger uppercase tracking-wider mb-1">
-                        Polymarket Implied
-                    </div>
-                    <div className="text-lg font-mono font-semibold text-danger">
+                    <div className="text-[9px] text-danger uppercase tracking-wider">Polymarket</div>
+                    <div className="text-base font-mono font-semibold text-danger">
                         {gapData ? formatPrice(gapData.poly_implied) : '--'}
                     </div>
                 </div>
             </div>
 
-            {/* Gap Percentage */}
-            <div className="mb-4 p-2 bg-void border border-gold/30 rounded text-center">
-                <div className="text-[9px] text-gold uppercase tracking-wider mb-1">
-                    Spread Gap
-                </div>
-                <div className={`text-2xl font-mono font-bold ${gapData && gapData.gap_percent > 0 ? 'text-neon-green' : 'text-danger'}`}>
-                    {gapData ? (gapData.gap_percent > 0 ? '+' : '') + gapData.gap_percent.toFixed(4) : '--'}%
-                </div>
-            </div>
-
-            {/* Live Heartbeat Chart */}
-            <div className="flex-1 min-h-[200px]">
-                <div className="text-[10px] text-text-muted uppercase tracking-wider mb-2">
-                    Live Heartbeat (Normalized)
-                </div>
-                <div className="h-[calc(100%-20px)] bg-void border border-border-dark rounded p-2">
-                    {chartData.length > 1 ? (
-                        <ResponsiveContainer width="100%" height="100%">
-                            <LineChart
-                                data={chartData}
-                                margin={{ top: 5, right: 5, bottom: 5, left: -20 }}
-                            >
-                                <XAxis
-                                    dataKey="time"
-                                    tick={{ fill: '#666', fontSize: 9 }}
-                                    axisLine={{ stroke: '#333' }}
-                                    tickLine={false}
-                                    interval="preserveStartEnd"
-                                />
-                                <YAxis
-                                    tick={{ fill: '#666', fontSize: 9 }}
-                                    axisLine={{ stroke: '#333' }}
-                                    tickLine={false}
-                                    tickFormatter={(v) => `${v.toFixed(2)}%`}
-                                    domain={['auto', 'auto']}
-                                />
-                                <Tooltip content={<CustomTooltip />} />
-                                <ReferenceLine y={0} stroke="#333" strokeDasharray="3 3" />
-
-                                {/* Binance Line - Green, moves first */}
-                                <Line
-                                    type="monotone"
-                                    dataKey="binance"
-                                    stroke="#00FF41"
-                                    strokeWidth={2}
-                                    dot={false}
-                                    isAnimationActive={false}
-                                    name="Binance"
-                                />
-
-                                {/* Polymarket Line - Red, lags behind */}
-                                <Line
-                                    type="monotone"
-                                    dataKey="polymarket"
-                                    stroke="#ff4444"
-                                    strokeWidth={2}
-                                    dot={false}
-                                    isAnimationActive={false}
-                                    name="Polymarket"
-                                />
-                            </LineChart>
-                        </ResponsiveContainer>
-                    ) : (
-                        <div className="h-full flex items-center justify-center text-text-muted text-sm">
-                            <div className="text-center">
-                                <div className="animate-pulse text-2xl mb-2">...</div>
-                                <div>Waiting for data stream</div>
+            {/* Toggle between Chart and Signals Table */}
+            {showChart ? (
+                /* Live Heartbeat Chart */
+                <div className="flex-1 min-h-[180px]">
+                    <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">
+                        Live Heartbeat
+                    </div>
+                    <div className="h-[calc(100%-16px)] bg-void border border-border-dark rounded p-2">
+                        {chartData.length > 1 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart
+                                    data={chartData}
+                                    margin={{ top: 5, right: 5, bottom: 5, left: -20 }}
+                                >
+                                    <XAxis
+                                        dataKey="time"
+                                        tick={{ fill: '#666', fontSize: 8 }}
+                                        axisLine={{ stroke: '#333' }}
+                                        tickLine={false}
+                                        interval="preserveStartEnd"
+                                    />
+                                    <YAxis
+                                        tick={{ fill: '#666', fontSize: 8 }}
+                                        axisLine={{ stroke: '#333' }}
+                                        tickLine={false}
+                                        tickFormatter={(v) => `${v.toFixed(1)}%`}
+                                        domain={['auto', 'auto']}
+                                    />
+                                    <Tooltip content={<CustomTooltip />} />
+                                    <ReferenceLine y={0} stroke="#333" strokeDasharray="3 3" />
+                                    <Line
+                                        type="monotone"
+                                        dataKey="binance"
+                                        stroke="#00FF41"
+                                        strokeWidth={2}
+                                        dot={false}
+                                        isAnimationActive={false}
+                                    />
+                                    <Line
+                                        type="monotone"
+                                        dataKey="polymarket"
+                                        stroke="#ff4444"
+                                        strokeWidth={2}
+                                        dot={false}
+                                        isAnimationActive={false}
+                                    />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        ) : (
+                            <div className="h-full flex items-center justify-center text-text-muted text-sm">
+                                <div className="text-center">
+                                    <div className="animate-pulse text-xl mb-1">...</div>
+                                    <div className="text-[10px]">Waiting for data</div>
+                                </div>
                             </div>
-                        </div>
-                    )}
+                        )}
+                    </div>
                 </div>
-            </div>
+            ) : (
+                /* Trade Signals Table */
+                <div className="flex-1 min-h-[180px] flex flex-col">
+                    <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1 flex justify-between">
+                        <span>Trade Signals</span>
+                        <span className="text-gold">{signals.length} detected</span>
+                    </div>
+                    <div className="flex-1 overflow-auto bg-void border border-border-dark rounded">
+                        {signals.length > 0 ? (
+                            <table className="w-full text-[10px]">
+                                <thead className="sticky top-0 bg-void-light">
+                                    <tr className="text-left text-text-secondary border-b border-border-dark">
+                                        <th className="font-mono font-normal py-1.5 px-2">TIME</th>
+                                        <th className="font-mono font-normal py-1.5 px-2">STRATEGY</th>
+                                        <th className="font-mono font-normal py-1.5 px-2">MARKET</th>
+                                        <th className="font-mono font-normal py-1.5 px-2 text-right">EV</th>
+                                        <th className="font-mono font-normal py-1.5 px-2 text-right">EDGE</th>
+                                        <th className="font-mono font-normal py-1.5 px-2">STATUS</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {signals.map((signal) => (
+                                        <tr
+                                            key={signal.id}
+                                            className={`border-b border-border-dark/50 hover:bg-void-light transition-colors ${getSignalRowClass(signal.signal_type)}`}
+                                        >
+                                            <td className="font-mono py-1.5 px-2 text-text-secondary">
+                                                {signal.time}
+                                            </td>
+                                            <td className="font-mono py-1.5 px-2">
+                                                <span className={`px-1.5 py-0.5 rounded border text-[9px] ${getSignalBadgeClass(signal.signal_type)}`}>
+                                                    {signal.signal_type}
+                                                </span>
+                                            </td>
+                                            <td className="font-mono py-1.5 px-2 text-text-primary">
+                                                {signal.market}
+                                            </td>
+                                            <td className="font-mono py-1.5 px-2 text-right text-gold font-semibold">
+                                                ${signal.ev_dollars.toFixed(2)}
+                                            </td>
+                                            <td className={`font-mono py-1.5 px-2 text-right font-semibold ${signal.edge_percent > 5 ? 'text-neon-green' : 'text-blue-400'}`}>
+                                                +{signal.edge_percent.toFixed(1)}%
+                                            </td>
+                                            <td className="font-mono py-1.5 px-2">
+                                                <span className="text-warning animate-pulse">
+                                                    {signal.status}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        ) : (
+                            <div className="h-full flex items-center justify-center text-text-muted">
+                                <div className="text-center">
+                                    <div className="text-2xl mb-2">SCANNING</div>
+                                    <div className="text-[10px]">Waiting for opportunities...</div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Legend */}
-            <div className="mt-3 flex justify-center gap-6 text-[10px]">
+            <div className="mt-2 flex justify-center gap-4 text-[9px]">
                 <div className="flex items-center gap-1">
-                    <span className="w-3 h-0.5 bg-neon-green"></span>
-                    <span className="text-neon-green">BINANCE (REAL-TIME)</span>
+                    <span className="w-2 h-2 rounded-full bg-neon-green"></span>
+                    <span className="text-neon-green">NEG-RISK</span>
                 </div>
                 <div className="flex items-center gap-1">
-                    <span className="w-3 h-0.5 bg-danger"></span>
-                    <span className="text-danger">POLYMARKET (LAGGED)</span>
+                    <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                    <span className="text-blue-400">LAT-LAG</span>
+                </div>
+                <div className="flex items-center gap-1">
+                    <span className="w-2 h-0.5 bg-neon-green"></span>
+                    <span className="text-text-muted">BINANCE</span>
+                </div>
+                <div className="flex items-center gap-1">
+                    <span className="w-2 h-0.5 bg-danger"></span>
+                    <span className="text-text-muted">POLY</span>
                 </div>
             </div>
 
             {/* Footer Stats */}
-            <div className="mt-3 pt-3 border-t border-border-dark flex justify-between text-[10px]">
+            <div className="mt-2 pt-2 border-t border-border-dark flex justify-between text-[9px]">
                 <div className="text-text-secondary">
                     <span className="text-neon-green font-mono">{priceHistory.length}</span> samples
+                </div>
+                <div className="text-text-secondary">
+                    <span className="text-gold font-mono">{signals.length}</span> signals
                 </div>
                 <div className="text-text-secondary">
                     avg lag: <span className="text-gold font-mono">{avgLatency}ms</span>
